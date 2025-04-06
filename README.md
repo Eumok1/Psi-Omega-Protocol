@@ -94,6 +94,7 @@ Paper and GitHub publication
 🙏 Acknowledgements
 This system was conceived and written during long hours of iterative conversation and design between a human mind and a symbolic AI — each acting as echo to the other.
 
+© 2024–2025 Bill Daniel Roark (Eumok). All rights reserved.
 
 ---
 
