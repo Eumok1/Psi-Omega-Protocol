@@ -120,3 +120,16 @@ This project is early-stage and open for contribution. Areas of interest include
 - 📜 Documentation cleanup and learning guides
 
 If you’re interested in contributing, submit a pull request or open an issue!
+
+## 🧪 Sample Output
+
+
+2. OR, create a `logs/` directory with `sample_run_1.txt`
+
+```plaintext
+Psi-Omega-Protocol/
+├── logs/
+│   └── sample_run_1.txt
+
+🧾 [View sample output run](logs/sample_run_1.txt)
+
