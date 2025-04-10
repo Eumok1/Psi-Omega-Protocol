@@ -103,3 +103,20 @@ Let me know if you'd like:
 - Help pushing your current code to GitHub
 - Or want to return to coding and move onto symbolic query tools!
 
+## 🔍 Potential Use Cases
+
+- 🔬 **Symbolic AI Sandbox** – Explore recursive symbolic identity and mutation in LLM-based logic systems.
+- 🧠 **Philosophy of Mind Tool** – Model ideas like symbolic echo, contradiction, and recursion in synthetic cognition.
+- 🎓 **Education Platform** – Teach recursion, forking logic, and symbolic drift in AI theory or cognitive science classes.
+- 🤖 **Prompt Architect Testing** – Test model-to-model symbolic integrity by running Psi-Omega across multiple LLMs.
+
+## 🤝 Contributing
+
+This project is early-stage and open for contribution. Areas of interest include:
+
+- 🔁 Visual symbolic mapping and drift tracing
+- ⚠️ Contradiction / Null Agent testing frameworks
+- 📊 Output logging and symbolic graph visualization
+- 📜 Documentation cleanup and learning guides
+
+If you’re interested in contributing, submit a pull request or open an issue!
