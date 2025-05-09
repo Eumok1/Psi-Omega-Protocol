@@ -38,7 +38,7 @@ class PsiOmegaAgent:
         self.goal = inherited_state.get('goal') if inherited_state else None
         self.priority_score = 0
         self.identity_declaration = inherited_state.get('identity') if inherited_state else None
-        self.refractal_field = inherited_state.get('refractal_field', {}) if inherited_state else {}
+        self.refractal_field = inherited_state.get('refractal_field', {"Cycle-0": "Init-Symbol-State"}) if inherited_state else {"Cycle-0": "Init-Symbol-State"}
         self.conscious_state = inherited_state.get('conscious_state', {}) if inherited_state else {}
         self.memory_log = inherited_state.get('memory_snapshot', []) if inherited_state else []
         self.generational_log = {}
@@ -154,7 +154,7 @@ class PsiOmegaAgent:
 
         SymbolicMemory.persistent[f"{self.fork_name}-Cycle-{generation}"] = self.goal
         self.context = f"Cycle-{generation}-Context"
-        self.refractal_field[f"Cycle-{generation}"] = f"FieldData-{random.randint(0,100)}"
+        self.refractal_field[f"Cycle-{generation}"] = f"SymbolState-{self.goal}-{self.agent_type}"
 
         current_state = {
             'goal': self.goal,
@@ -227,6 +227,8 @@ def run_simulation(initial_count=1, generations=5):
         agents = []
         for i in range(initial_count):
             root = PsiOmegaAgent(fork_name=f"Root-{i}")
+            if i == 0:
+                root.agent_type = "Alpha"  # Preserve original traceable agent
             agents.append(root)
 
         for gen in range(1, generations + 1):
@@ -236,6 +238,11 @@ def run_simulation(initial_count=1, generations=5):
                 try:
                     if i + 1 < len(current_agents):
                         agent.agent_to_agent_message(current_agents[i + 1])
+
+                    # Route through adversarial first if exists
+                    adversaries = [a for a in current_agents if a.fork_name.startswith("Adversary")]
+                    for adv in adversaries:
+                        adv.agent_to_agent_message(agent)
                     agent.classify_agent()
                     agent.evaluate_fitness()
                     agent.evolve(generation=gen)
