@@ -153,7 +153,13 @@ class PsiOmegaAgent:
             self.goal = f"EvolveGoal-{generation}-{random.randint(1000,9999)}"
 
         SymbolicMemory.persistent[f"{self.fork_name}-Cycle-{generation}"] = self.goal
-        self.context = f"Cycle-{generation}-Context"
+        context_components = [
+            f"Gen{generation}",
+            f"Goal:{self.goal}" if self.goal else "Goal:None",
+            f"Type:{self.agent_type}",
+            f"Drift:{self.drift_metrics.get(f'Cycle-{generation}-Drift', 0)}"
+        ]
+        self.context = " | ".join(context_components)
         self.refractal_field[f"Cycle-{generation}"] = f"SymbolState-{self.goal}-{self.agent_type}"
 
         current_state = {
