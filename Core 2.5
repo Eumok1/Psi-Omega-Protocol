@@ -341,7 +341,22 @@ def visualize_symbolic_ecosystem():
         print(f"[{agent.fork_name}] ← {origin} | Type: {agent_type} | Score: {score}")
     print("----------------------------------------")
 
-# Agent Symbolic State Exporter
+# Symbolic Linkage and Ancestry Tracker
+
+def trace_symbolic_lineage():
+    for agent in PsiOmegaAgent.ecosystem:
+        lineage = []
+        if agent.fork_name in SymbolicMemory.retention:
+            for entry in SymbolicMemory.retention[agent.fork_name]:
+                if "from" in entry:
+                    parts = entry.split(" from ")
+                    if len(parts) > 1:
+                        parent = parts[1].strip()
+                        lineage.append((parent, agent.fork_name))
+                        PsiOmegaAgent.fork_lineage.append((parent, agent.fork_name))
+        SymbolicMemory.lineage_scans[agent.fork_name] = lineage
+
+
 
 def export_agent_symbolic_state(fork_name, filename=None):
     agent_data = {
