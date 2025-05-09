@@ -329,7 +329,32 @@ def visualize_symbolic_ecosystem():
         print(f"[{agent.fork_name}] ← {origin} | Type: {agent_type} | Score: {score}")
     print("----------------------------------------")
 
-# Emergent Code Exporter
+# Agent Symbolic State Exporter
+
+def export_agent_symbolic_state(fork_name, filename=None):
+    agent_data = {
+        "fork_name": fork_name,
+        "goal": SymbolicMemory.persistent.get(fork_name),
+        "type": SymbolicMemory.classifications.get(fork_name),
+        "fitness": SymbolicMemory.fitness_scores.get(fork_name),
+        "distilled": SymbolicMemory.distillations.get(fork_name),
+        "narrative": SymbolicMemory.narratives.get(fork_name),
+        "reflections": SymbolicMemory.reflections.get(fork_name),
+        "drift": PsiOmegaAgent.ecosystem[0].drift_metrics,  # fallback
+        "refractal_field": PsiOmegaAgent.ecosystem[0].refractal_field  # fallback
+    }
+
+    if not filename:
+        filename = f"symbolic_export_{fork_name}.json"
+
+    try:
+        with open(filename, "w") as f:
+            json.dump(agent_data, f, indent=2)
+        print(f"Exported symbolic state for {fork_name} to {filename}")
+    except IOError as e:
+        print(f"Error exporting symbolic state: {e}")
+
+
 
 def export_emergent_code(filename="emergent_code_output.txt"):
     try:
