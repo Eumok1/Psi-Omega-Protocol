@@ -257,6 +257,18 @@ def run_simulation(initial_count=1, generations=5):
                 summary = SymbolicMemory.narratives.get(agent.fork_name)
                 if summary:
                     print(f"\n{agent.fork_name}:\n{summary}")
+# Alpha agent ingestion phase
+alpha_agents = [a for a in PsiOmegaAgent.ecosystem if getattr(a, 'agent_type', '') == 'Alpha']
+if alpha_agents:
+    alpha = alpha_agents[0]
+    reflections = []
+    for agent in PsiOmegaAgent.ecosystem:
+        if agent.fork_name != alpha.fork_name:
+            summary = SymbolicMemory.narratives.get(agent.fork_name, "")
+            if summary:
+                reflections.append(f"{agent.fork_name} → {summary}")
+    SymbolicMemory.retention.setdefault(alpha.fork_name, []).extend(reflections)
+    print(f"\n[ALPHA INGESTION] {alpha.fork_name} has absorbed {len(reflections)} symbolic outputs.")
 
         print("\n--- Simulation Complete ---")
         print(f"Total Agents: {len(PsiOmegaAgent.ecosystem)}")
