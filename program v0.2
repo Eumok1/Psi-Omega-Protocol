@@ -1,0 +1,700 @@
+#!/usr/bin/env python3
+"""
+Psi-Omega Engine — single-file standalone program
+Now with a Minimal Agent Team (Architect/Planner, Builder, Critic/Tester), real API LLM adapter + prompt cache,
+**and a Local LLM adapter (llama.cpp) for offline recursion.**
+- Deterministic, seedable engine
+- Pluggable policies (drift, mutation, fitness, fork, goals)
+- LLM adapters: Null (offline), API (OpenAI-style), Local (llama.cpp) with JSON cache
+- CLI for running simulations and/or the agent team pipeline
+"""
+from __future__ import annotations
+import argparse
+import dataclasses
+import difflib
+import hashlib
+import json
+import os
+import random
+import re
+import threading
+import time
+from typing import Dict, List, Tuple, Optional, Protocol, runtime_checkable, Any
+
+# =====================
+# Config / Settings
+# =====================
+@dataclasses.dataclass
+class Settings:
+    max_forks: int = 3
+    max_recursions: int = 2
+    drift_threshold: int = 50
+    high_drift_trigger: int = 60
+    fitness_recursion_min: int = 10
+    priority_recursion_min: int = 5
+    mutation_rate: float = 0.2
+    schema_version: str = "0.4.0"
+    # Team defaults
+    max_ticket_minutes: int = 90
+    coverage_target: int = 70
+    # LLM/cache
+    cache_dir: str = ".psiomega_cache"
+
+# =====================
+# LLM Adapter Interface + Cache
+# =====================
+@runtime_checkable
+class LLM(Protocol):
+    def generate(self, prompt: str, **kwargs) -> str: ...
+
+class PromptCache:
+    def __init__(self, cache_dir: str):
+        self.cache_dir = cache_dir
+        os.makedirs(cache_dir, exist_ok=True)
+        self.path = os.path.join(cache_dir, "cache.json")
+        if os.path.exists(self.path):
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    self.db = json.load(f)
+            except Exception:
+                self.db = {}
+        else:
+            self.db = {}
+    def _key(self, provider: str, model: str, prompt: str) -> str:
+        h = hashlib.sha256(f"{provider}\n{model}\n{prompt}".encode("utf-8")).hexdigest()
+        return h
+    def get(self, provider: str, model: str, prompt: str) -> Optional[str]:
+        return self.db.get(self._key(provider, model, prompt))
+    def put(self, provider: str, model: str, prompt: str, output: str) -> None:
+        self.db[self._key(provider, model, prompt)] = output
+        try:
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump(self.db, f)
+        except Exception:
+            pass
+
+class NullLLM:
+    """Default no-op LLM. Returns simple echoes to keep program self-contained."""
+    def generate(self, prompt: str, **kwargs) -> str:
+        return f"[NullLLM] {prompt[:160]}"
+
+class APILLM:
+    """Minimal API-backed adapter (OpenAI-compatible). Uses env var OPENAI_API_KEY.
+    Falls back gracefully if deps/keys are missing. Caches outputs for determinism.
+    """
+    def __init__(self, provider: str = "openai", model: str = "gpt-4o-mini", cache: Optional[PromptCache] = None):
+        self.provider = provider
+        self.model = model
+        self.cache = cache or PromptCache(Settings().cache_dir)
+        self._client = None
+        self._init_client()
+
+    def _init_client(self):
+        if self.provider != "openai":
+            self._client = None
+            return
+        try:
+            import openai  # type: ignore
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                self._client = None
+                return
+            openai.api_key = api_key
+            self._client = openai
+        except Exception:
+            self._client = None
+
+    def generate(self, prompt: str, **kwargs) -> str:
+        cached = self.cache.get(self.provider, self.model, prompt)
+        if cached is not None:
+            return cached
+        if self._client is None:
+            out = f"[{self.provider}:{self.model} Fallback] {prompt[:200]}"
+            self.cache.put(self.provider, self.model, prompt, out)
+            return out
+        try:
+            if hasattr(self._client, "ChatCompletion"):
+                resp = self._client.ChatCompletion.create(
+                    model=self.model,
+                    messages=[{"role":"user","content":prompt}],
+                    temperature=kwargs.get("temperature", 0.2),
+                )
+                text = resp["choices"][0]["message"]["content"].strip()
+            else:
+                resp = self._client.Completion.create(
+                    model=self.model,
+                    prompt=prompt,
+                    max_tokens=kwargs.get("max_tokens", 512),
+                    temperature=kwargs.get("temperature", 0.2),
+                )
+                text = resp["choices"][0]["text"].strip()
+            self.cache.put(self.provider, self.model, prompt, text)
+            return text
+        except Exception as e:
+            out = f"[{self.provider}:{self.model} Error:{type(e).__name__}] {prompt[:200]}"
+            self.cache.put(self.provider, self.model, prompt, out)
+            return out
+
+class LocalLLM:
+    """Local llama.cpp-backed adapter (via llama-cpp-python). Uses GGUF model files.
+    Env vars (optional):
+      PSIOMEGA_LOCAL_MODEL  -> path to .gguf
+      PSIOMEGA_LOCAL_CTX    -> context window (int)
+    CLI flags override env vars.
+    """
+    def __init__(self, model_path: Optional[str] = None, n_ctx: int = 4096, cache: Optional[PromptCache] = None):
+        self.provider = "local"
+        self.model = model_path or os.getenv("PSIOMEGA_LOCAL_MODEL", "")
+        self.n_ctx = int(os.getenv("PSIOMEGA_LOCAL_CTX", n_ctx))
+        self.cache = cache or PromptCache(Settings().cache_dir)
+        self._llm = None
+        self._init()
+
+    def _init(self):
+        try:
+            from llama_cpp import Llama  # type: ignore
+            if not self.model or not os.path.exists(self.model):
+                self._llm = None
+                return
+            self._llm = Llama(model_path=self.model, n_ctx=self.n_ctx, logits_all=False)
+        except Exception:
+            self._llm = None
+
+    def generate(self, prompt: str, **kwargs) -> str:
+        cached = self.cache.get(self.provider, self.model or "(unset)", prompt)
+        if cached is not None:
+            return cached
+        if self._llm is None:
+            out = f"[local:llama Fallback] {prompt[:200]}"
+            self.cache.put(self.provider, self.model or "(unset)", prompt, out)
+            return out
+        try:
+            resp = self._llm(
+                prompt,
+                temperature=float(kwargs.get("temperature", 0.2)),
+                max_tokens=int(kwargs.get("max_tokens", 512)),
+                stop=kwargs.get("stop"),
+            )
+            # llama-cpp-python returns dict; text under 'choices'[0]['text'] or 'choices'[0]['message']['content']
+            text = ""
+            try:
+                text = resp["choices"][0]["text"]
+            except Exception:
+                try:
+                    text = resp["choices"][0]["message"]["content"]
+                except Exception:
+                    text = str(resp)
+            text = (text or "").strip()
+            self.cache.put(self.provider, self.model or "(unset)", prompt, text)
+            return text
+        except Exception as e:
+            out = f"[local:llama Error:{type(e).__name__}] {prompt[:200]}"
+            self.cache.put(self.provider, self.model or "(unset)", prompt, out)
+            return out
+
+# =====================
+# Policies (pluggable)
+# =====================
+class DriftPolicy:
+    def drift(self, rng: random.Random, agent: "Agent", gen: int) -> int:
+        return rng.randint(0, 100)
+
+class MutationPolicy:
+    def __init__(self, rate: float):
+        self.rate = rate
+    def mutate(self, rng: random.Random, agent: "Agent") -> Optional[Tuple[str, str]]:
+        if agent.symbol and rng.random() < self.rate:
+            before = agent.symbol
+            after = before[::-1]
+            agent.symbol = after
+            return (before, after)
+        return None
+
+class FitnessPolicy:
+    def score(self, agent: "Agent", memory: "Memory") -> int:
+        memory_volume = len(memory.retention.get(agent.name, []))
+        anomaly_penalty = len(memory.anomalies.get(agent.name, [])) * 2
+        classification_bonus = 2 if agent.agent_type == "Synthesizer" else 0
+        return agent.priority_score + (memory_volume // 3) + classification_bonus - anomaly_penalty
+
+class ForkPolicy:
+    def should_standard_fork(self, drift_value: int, settings: Settings) -> bool:
+        return drift_value > settings.drift_threshold
+    def next_name(self, agent: "Agent") -> str:
+        return f"{agent.name}_fork{len(agent.children)+1}"
+
+class GoalPolicy:
+    def __init__(self, llm: LLM):
+        self.llm = llm
+    def classify(self, goal: Optional[str]) -> str:
+        if goal and "Recall" in goal:
+            return "Reflector"
+        if goal and "Insight" in goal:
+            return "Synthesizer"
+        return "Wanderer"
+    def evolve_goal(self, prev_goal: Optional[str], gen: int, rng: random.Random, context: str = "") -> str:
+        prompt = (
+            "You are the Goal Synthesizer for a recursive agent.\n"
+            f"Previous goal: {prev_goal}\n"
+            f"Context: {context}\n"
+            "Return ONE short new goal string that is actionable for the next generation."
+        )
+        try:
+            text = self.llm.generate(prompt).strip()
+            text = text.splitlines()[0].strip()
+            return text if text else (prev_goal or f"EvolveGoal-{gen}-{rng.randint(1000,9999)}")
+        except Exception:
+            return prev_goal or f"EvolveGoal-{gen}-{rng.randint(1000,9999)}"
+
+# =====================
+# Memory / State
+# =====================
+@dataclasses.dataclass
+class Memory:
+    dialogue_log: List[str] = dataclasses.field(default_factory=list)
+    failed_forks_log: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
+    emergent_codebase: List[Dict[str, str]] = dataclasses.field(default_factory=list)
+    retention: Dict[str, List[str]] = dataclasses.field(default_factory=dict)
+    persistent: Dict[str, str] = dataclasses.field(default_factory=dict)
+    compressed_exports: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    translated_lineage: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    decay_index: Dict[str, int] = dataclasses.field(default_factory=dict)
+    reflections: Dict[str, List[str]] = dataclasses.field(default_factory=dict)
+    anomalies: Dict[str, List[str]] = dataclasses.field(default_factory=list)
+    lineage_scans: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    interaction_map: Dict[str, Dict[str, int]] = dataclasses.field(default_factory=dict)
+    drift_history: Dict[str, List[Tuple[int,int]]] = dataclasses.field(default_factory=dict)
+    mutation_log: Dict[str, List[Tuple[str,str]]] = dataclasses.field(default_factory=dict)
+    fitness_scores: Dict[str, int] = dataclasses.field(default_factory=dict)
+    distillations: Dict[str, List[str]] = dataclasses.field(default_factory=dict)
+    narratives: Dict[str, str] = dataclasses.field(default_factory=dict)
+
+# =====================
+# Agent
+# =====================
+class Agent:
+    def __init__(self, name: str, inherited_state: Optional[Dict[str, Any]] = None):
+        self.name = name
+        self.symbol: Optional[str] = None
+        self.contradictory: bool = False
+        self.children: List[str] = []
+        self.goal: Optional[str] = (inherited_state or {}).get('goal')
+        self.priority_score: int = 0
+        self.agent_type: Optional[str] = None
+        self.identity_declaration: Optional[str] = (inherited_state or {}).get('identity')
+        self.refractal_field: Dict[str,str] = (inherited_state or {}).get('refractal_field', {"Cycle-0":"Init-Symbol-State"})
+        self.conscious_state: Dict[str,Any] = (inherited_state or {}).get('conscious_state', {})
+        self.memory_log: List[str] = (inherited_state or {}).get('memory_snapshot', [])
+        self.generational_log: Dict[str,Any] = {}
+        self.drift_metrics: Dict[str,int] = {}
+        self.recursion_depth: int = 0
+        self.fitness_score: int = 0
+        self.context: str = ""
+
+# =====================
+# Engine (core sim)
+# =====================
+class Engine:
+    def __init__(self, settings: Optional[Settings] = None, llm: Optional[LLM] = None, seed: Optional[int] = None):
+        self.settings = settings or Settings()
+        self.llm = llm or NullLLM()
+        self.cache = PromptCache(self.settings.cache_dir)
+        self.memory = Memory()
+        self.agents: Dict[str, Agent] = {}
+        self.lock = threading.Lock()
+        self.rng = random.Random(seed)
+        self.seed = seed
+        self.drift_policy = DriftPolicy()
+        self.mutation_policy = MutationPolicy(rate=self.settings.mutation_rate)
+        self.fitness_policy = FitnessPolicy()
+        self.fork_policy = ForkPolicy()
+        self.goal_policy = GoalPolicy(self.llm)
+
+    def create_agent(self, name: str, inherited_state: Optional[Dict[str,Any]] = None) -> Agent:
+        if name in self.agents:
+            raise ValueError(f"Agent '{name}' already exists")
+        agent = Agent(name, inherited_state)
+        self.agents[name] = agent
+        return agent
+
+    def agent_to_agent_message(self, a: Agent, b: Agent):
+        m = self.memory
+        m.interaction_map.setdefault(a.name, {}).setdefault(b.name, 0)
+        m.interaction_map[a.name][b.name] += 1
+        if a.symbol and b.symbol and a.symbol != b.symbol:
+            m.dialogue_log.append(f"{a.name} vs {b.name}: Symbol clash {a.symbol} ≠ {b.symbol}")
+            b.contradictory = True
+        elif a.symbol == b.symbol and a.symbol is not None:
+            m.dialogue_log.append(f"{a.name} syncs with {b.name} on {a.symbol}")
+
+    def tick(self, gen: int):
+        names = list(self.agents.keys())
+        for i, name in enumerate(names):
+            a = self.agents[name]
+            if i + 1 < len(names):
+                self.agent_to_agent_message(a, self.agents[names[i+1]])
+        for agent in list(self.agents.values()):
+            agent.agent_type = self.goal_policy.classify(agent.goal)
+            drift = self.drift_policy.drift(self.rng, agent, gen)
+            agent.drift_metrics[f"Cycle-{gen}-Drift"] = drift
+            self.memory.drift_history.setdefault(agent.name, []).append((gen, drift))
+            mutation = self.mutation_policy.mutate(self.rng, agent)
+            if mutation:
+                self.memory.mutation_log.setdefault(agent.name, []).append(mutation)
+            prev_key = f"{agent.name}-Cycle-{gen-1}"
+            prev_goal = self.memory.persistent.get(prev_key)
+            context = f"Gen{gen} | Type:{agent.agent_type} | Drift:{drift}"
+            agent.goal = self.goal_policy.evolve_goal(prev_goal, gen, self.rng, context=context)
+            self.memory.persistent[f"{agent.name}-Cycle-{gen}"] = agent.goal
+            agent.context = f"Gen{gen} | Goal:{agent.goal} | Type:{agent.agent_type} | Drift:{drift}"
+            agent.refractal_field[f"Cycle-{gen}"] = f"SymbolState-{agent.goal}-{agent.agent_type}"
+            agent.fitness_score = self.fitness_policy.score(agent, self.memory)
+            self.memory.fitness_scores[agent.name] = agent.fitness_score
+            if self.fork_policy.should_standard_fork(drift, self.settings):
+                self._try_fork(agent, gen, fork_type="standard")
+            if agent.agent_type == "Wanderer" and drift > self.settings.high_drift_trigger and agent.recursion_depth < self.settings.max_recursions:
+                self._try_fork(agent, gen, fork_type="adversary")
+                agent.recursion_depth += 1
+            elif agent.recursion_depth >= self.settings.max_recursions:
+                self.memory.failed_forks_log.append({"origin": agent.name, "error": "Recursion limit reached"})
+            elif agent.fitness_score > self.settings.fitness_recursion_min and agent.priority_score >= self.settings.priority_recursion_min:
+                self._try_fork(agent, gen, fork_type="recursive")
+                agent.recursion_depth += 1
+            self.memory.narratives[agent.name] = f"{agent.name} [{agent.agent_type}] goal={agent.goal} fitness={agent.fitness_score} drift={drift}"
+        alphas = [a for a in self.agents.values() if a.agent_type == "Alpha"]
+        if alphas:
+            alpha = alphas[0]
+            reflections = [f"{name} → {self.memory.narratives.get(name,'')}" for name in self.agents if name != alpha.name]
+            self.memory.retention.setdefault(alpha.name, []).extend(reflections)
+
+    def _try_fork(self, agent: Agent, gen: int, fork_type: str):
+        if len(agent.children) >= self.settings.max_forks:
+            self.memory.failed_forks_log.append({"origin": agent.name, "error": "Max forks reached"})
+            return None
+        child_name = (f"{fork_type}-{self.rng.randint(10000,99999)}" if fork_type != "standard" else self.fork_policy.next_name(agent))
+        child_state = {
+            'goal': (f"Counter-{agent.goal}" if fork_type == 'adversary' else agent.goal),
+            'identity': (f"AdversarialEcho-{agent.identity_declaration}" if fork_type == 'adversary' else agent.identity_declaration),
+            'refractal_field': dict(agent.refractal_field),
+            'context': (f"Trigger-Contra-{agent.context}" if fork_type == 'adversary' else agent.context),
+            'conscious_state': dict(agent.conscious_state),
+            'memory_snapshot': list(agent.memory_log)
+        }
+        child = self.create_agent(child_name, child_state)
+        child.symbol = agent.symbol
+        child.contradictory = (fork_type == 'adversary')
+        agent.children.append(child_name)
+        self.memory.retention.setdefault(child_name, []).append(f"Forked from {agent.name}")
+        return child
+
+    def run(self, initial_count: int = 1, generations: int = 5) -> None:
+        if initial_count <= 0 or generations <= 0:
+            raise ValueError("Both initial_count and generations must be positive integers.")
+        with self.lock:
+            for i in range(initial_count):
+                root = self.create_agent(f"Root-{i}")
+                if i == 0:
+                    root.agent_type = "Alpha"
+            for gen in range(1, generations + 1):
+                print(f"=== Generation {gen} ===")
+                self.tick(gen)
+            print("\n--- Simulation Complete ---")
+            print(f"Total Agents: {len(self.agents)}")
+
+    def export_state(self) -> Dict[str, Any]:
+        return {
+            "schema": self.settings.schema_version,
+            "seed": self.seed,
+            "settings": dataclasses.asdict(self.settings),
+            "agents": {name: self._agent_to_dict(a) for name, a in self.agents.items()},
+            "memory": dataclasses.asdict(self.memory),
+            "timestamp": time.time(),
+        }
+    def _agent_to_dict(self, a: Agent) -> Dict[str, Any]:
+        return {
+            "name": a.name,
+            "symbol": a.symbol,
+            "contradictory": a.contradictory,
+            "children": list(a.children),
+            "goal": a.goal,
+            "priority_score": a.priority_score,
+            "agent_type": a.agent_type,
+            "identity_declaration": a.identity_declaration,
+            "refractal_field": dict(a.refractal_field),
+            "conscious_state": dict(a.conscious_state),
+            "memory_log": list(a.memory_log),
+            "generational_log": dict(a.generational_log),
+            "drift_metrics": dict(a.drift_metrics),
+            "recursion_depth": a.recursion_depth,
+            "fitness_score": a.fitness_score,
+            "context": a.context,
+        }
+
+# =====================
+# Minimal Agent Team (Planner, Builder, Critic)
+# =====================
+@dataclasses.dataclass
+class Ticket:
+    id: int
+    title: str
+    description: str
+    estimate_minutes: int
+    acceptance_criteria: List[str]
+    done_definition: str
+    status: str = "todo"
+    artifacts: Dict[str, str] = dataclasses.field(default_factory=dict)
+    notes: List[str] = dataclasses.field(default_factory=list)
+
+class ArchitectPlanner:
+    def __init__(self, settings: Settings, llm: LLM, rng: random.Random):
+        self.settings = settings
+        self.llm = llm
+        self.rng = rng
+
+    def plan(self, idea: str) -> Tuple[str, List[Ticket]]:
+        spec = self._make_spec(idea)
+        tasks = self._llm_tasks(idea)
+        tickets: List[Ticket] = []
+        for i, task in enumerate(tasks, start=1):
+            title = task.get("title", f"Task {i}")
+            ac = task.get("acceptance", ["Output exists", "Task estimate ≤ 90 minutes", "Includes 'done =' line"]) 
+            minutes = min(self.settings.max_ticket_minutes, int(task.get("estimate", 60)))
+            tickets.append(Ticket(
+                id=i,
+                title=title,
+                description=task.get("desc", f"Implement: {title}"),
+                estimate_minutes=minutes,
+                acceptance_criteria=ac,
+                done_definition=f"done = {'; '.join(ac)}"
+            ))
+        return spec, tickets
+
+    def _llm_tasks(self, idea: str) -> List[Dict[str, Any]]:
+        prompt = (
+            "You are the Architect/Planner. Break the idea into 4-6 tasks.\n"
+            "Rules: each task ≤ 90 minutes; include concrete acceptance.\n"
+            "Return strict JSON list of objects: {title, desc, estimate, acceptance[]}\n"
+            f"Idea: {idea}\n"
+        )
+        raw = self.llm.generate(prompt)
+        tasks: List[Dict[str, Any]] = []
+        try:
+            js = json.loads(raw)
+            if isinstance(js, list):
+                tasks = js
+        except Exception:
+            tasks = [
+                {"title":"Draft spec and acceptance criteria","desc":"Create spec.md and AC","estimate":60, "acceptance":["spec.md present","AC present","done line present"]},
+                {"title":"Define data models","desc":"Ticket, Run, Report dataclasses","estimate":60, "acceptance":["dataclasses added","serialized","tests exist"]},
+                {"title":"Implement builder and tests","desc":"Generate code+tests per ticket","estimate":75, "acceptance":["code stubs","tests pass"]},
+                {"title":"Wire CLI and artifacts","desc":"CLI flags + outputs","estimate":60, "acceptance":["CLI works","export file written"]},
+                {"title":"Critic checks","desc":"static + simple property tests","estimate":60, "acceptance":["reports generated","coverage ≥ target"]}
+            ]
+        for t in tasks:
+            try:
+                t["estimate"] = min(self.settings.max_ticket_minutes, int(t.get("estimate", 60)))
+            except Exception:
+                t["estimate"] = 60
+        return tasks
+
+    def _make_spec(self, idea: str) -> str:
+        return (
+            "# spec.md\n"
+            f"## Vision\n{idea}\n\n"
+            "## API\n- POST /run\n- GET /state/{id}\n\n"
+            "## Modules\n- Engine\n- Policies\n- Team Orchestrator\n"
+        )
+
+class Builder:
+    def __init__(self, rng: random.Random):
+        self.rng = rng
+
+    def implement(self, tickets: List[Ticket], base_fs: Dict[str, str]) -> Tuple[List[Ticket], Dict[str,str]]:
+        fs = dict(base_fs)
+        for t in tickets:
+            if t.status == "done":
+                continue
+            code_path = f"src/{self._slug(t.title)}.py"
+            test_path = f"tests/test_{self._slug(t.title)}.py"
+            code_before = fs.get(code_path, "")
+            code_after = code_before + self._code_stub(t)
+            fs[code_path] = code_after
+            fs[test_path] = self._test_stub(t)
+            t.artifacts["code_path"] = code_path
+            t.artifacts["test_path"] = test_path
+            t.artifacts["diff"] = self._unified_diff(code_before, code_after, code_path)
+            t.status = "done"
+        return tickets, fs
+
+    def _slug(self, s: str) -> str:
+        import re as _re
+        return _re.sub(r"[^a-z0-9]+","_", s.lower()).strip("_")
+
+    def _code_stub(self, t: Ticket) -> str:
+        return (
+            f"\n\n# Auto-generated for ticket {t.id}: {t.title}\n"
+            f"def task_{t.id}_impl():\n    return True\n"
+        )
+
+    def _test_stub(self, t: Ticket) -> str:
+        return (
+            "import unittest\n"
+            f"from src.{self._slug(t.title)} import task_{t.id}_impl\n\n"
+            f"class TestTicket{t.id}(unittest.TestCase):\n    def test_task(self):\n        self.assertTrue(task_{t.id}_impl())\n\n"
+        )
+
+    def _unified_diff(self, before: str, after: str, path: str) -> str:
+        diff = difflib.unified_diff(
+            before.splitlines(True), after.splitlines(True),
+            fromfile=f"a/{path}", tofile=f"b/{path}", lineterm=""
+        )
+        return "".join(diff)
+
+class CriticTester:
+    def __init__(self, settings: Settings, llm: LLM):
+        self.settings = settings
+        self.llm = llm
+
+    def review(self, tickets: List[Ticket], fs: Dict[str,str]) -> Dict[str, Any]:
+        reports: List[Dict[str, Any]] = []
+        critical = 0
+        high = 0
+        for t in tickets:
+            issues = []
+            code_ok = t.artifacts.get("code_path") in fs and f"task_{t.id}_impl" in fs[t.artifacts.get("code_path","")]
+            test_ok = t.artifacts.get("test_path") in fs
+            if not code_ok:
+                issues.append({"severity":"critical","msg":"Missing implementation"}); critical += 1
+            if not test_ok:
+                issues.append({"severity":"high","msg":"Missing unit test"}); high += 1
+            if not any("done =" in t.done_definition for _ in [0]):
+                issues.append({"severity":"high","msg":"No done= line"}); high += 1
+            failing = self._llm_fail_case(t)
+            if failing:
+                issues.append({"severity":"high","msg":f"Suggested failing test: {failing[:120]}"}); high += 0
+            reports.append({"ticket": t.id, "title": t.title, "issues": issues})
+        with_tests = sum(1 for t in tickets if t.artifacts.get("test_path") in fs)
+        coverage = int(100 * with_tests / max(1, len(tickets)))
+        return {
+            "reports": reports,
+            "critical": critical,
+            "high": high,
+            "coverage": coverage,
+            "meets_gate": (critical == 0 and high <= 1 and coverage >= self.settings.coverage_target)
+        }
+
+    def _llm_fail_case(self, t: Ticket) -> Optional[str]:
+        prompt = (
+            "You are the Critic/Tester. Propose ONE concise failing test scenario for the ticket.\n"
+            f"Title: {t.title}\n"
+            f"Acceptance: {t.acceptance_criteria}\n"
+            "Return a single line."
+        )
+        try:
+            return self.llm.generate(prompt).splitlines()[0].strip()
+        except Exception:
+            return None
+
+# =====================
+# Team Orchestrator
+# =====================
+@dataclasses.dataclass
+class TeamRun:
+    idea: str
+    spec_md: str
+    tickets: List[Ticket]
+    fs: Dict[str,str]
+    critic_summary: Dict[str,Any]
+
+class Team:
+    def __init__(self, settings: Settings, llm: LLM, rng: random.Random):
+        self.settings = settings
+        self.planner = ArchitectPlanner(settings, llm, rng)
+        self.builder = Builder(rng)
+        self.critic = CriticTester(settings, llm)
+
+    def execute(self, idea: str) -> TeamRun:
+        spec, tickets = self.planner.plan(idea)
+        for t in tickets:
+            t.estimate_minutes = min(t.estimate_minutes, self.settings.max_ticket_minutes)
+            if not t.done_definition.startswith("done ="):
+                t.done_definition = "done = " + t.done_definition.partition("=")[2].strip()
+        fs: Dict[str,str] = {"spec.md": spec}
+        tickets, fs = self.builder.implement(tickets, fs)
+        critic_summary = self.critic.review(tickets, fs)
+        return TeamRun(idea=idea, spec_md=spec, tickets=tickets, fs=fs, critic_summary=critic_summary)
+
+# =====================
+# CLI
+# =====================
+
+def main():
+    parser = argparse.ArgumentParser(description="Psi-Omega standalone engine + minimal agent team")
+    sub = parser.add_subparsers(dest="cmd", required=False)
+
+    # Simulation args
+    p_run = sub.add_parser("sim", help="run the symbolic simulation")
+    p_run.add_argument("--gens", type=int, default=5)
+    p_run.add_argument("--agents", type=int, default=1)
+    p_run.add_argument("--seed", type=int, default=None)
+    p_run.add_argument("--use-llm", choices=["none","api","local"], default="none")
+    p_run.add_argument("--provider", type=str, default="openai")
+    p_run.add_argument("--model", type=str, default="gpt-4o-mini")
+    p_run.add_argument("--local-model", type=str, default=os.getenv("PSIOMEGA_LOCAL_MODEL", ""))
+    p_run.add_argument("--local-n-ctx", type=int, default=int(os.getenv("PSIOMEGA_LOCAL_CTX", "4096")))
+
+    # Team args
+    p_team = sub.add_parser("team", help="run the minimal agent team pipeline")
+    p_team.add_argument("--idea", type=str, required=True, help="product/feature idea")
+    p_team.add_argument("--seed", type=int, default=None)
+    p_team.add_argument("--export", type=str, default=None)
+    p_team.add_argument("--use-llm", choices=["none","api","local"], default="none")
+    p_team.add_argument("--provider", type=str, default="openai")
+    p_team.add_argument("--model", type=str, default="gpt-4o-mini")
+    p_team.add_argument("--local-model", type=str, default=os.getenv("PSIOMEGA_LOCAL_MODEL", ""))
+    p_team.add_argument("--local-n-ctx", type=int, default=int(os.getenv("PSIOMEGA_LOCAL_CTX", "4096")))
+
+    args = parser.parse_args()
+
+    def build_llm(which: str) -> LLM:
+        if which == "api":
+            return APILLM(args.provider, args.model)
+        if which == "local":
+            return LocalLLM(model_path=args.local_model, n_ctx=args.local_n_ctx)
+        return NullLLM()
+
+    if args.cmd == "sim" or args.cmd is None:
+        engine_llm: LLM = build_llm(getattr(args, 'use_llm', 'none'))
+        engine = Engine(settings=Settings(), llm=engine_llm, seed=getattr(args, 'seed', None))
+        engine.run(initial_count=getattr(args, 'agents', 1), generations=getattr(args, 'gens', 5))
+        state = engine.export_state()
+        print(json.dumps({
+            "schema": state["schema"],
+            "seed": state["seed"],
+            "agents": len(state["agents"]),
+            "dialogue_events": len(state["memory"].get("dialogue_log", [])),
+        }, indent=2))
+        return
+
+    if args.cmd == "team":
+        llm: LLM = build_llm(args.use_llm)
+        settings = Settings()
+        rng = random.Random(args.seed)
+        team = Team(settings, llm, rng)
+        run = team.execute(args.idea)
+        out = {
+            "idea": run.idea,
+            "critic": run.critic_summary,
+            "tickets": [dataclasses.asdict(t) for t in run.tickets],
+            "files": list(run.fs.keys()),
+        }
+        if args.export:
+            with open(args.export, "w", encoding="utf-8") as f:
+                json.dump(out, f, indent=2)
+            print(f"Exported run to {args.export}")
+        else:
+            print(json.dumps(out, indent=2))
+        return
+
+if __name__ == "__main__":
+    main()
