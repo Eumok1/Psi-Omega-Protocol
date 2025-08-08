@@ -1,0 +1,58 @@
+I'll patch the `Memory` dataclass bug and add a built-in `selftest` command so you can verify the program runs without any LLM or external setup.
+
+```python
+@dataclasses.dataclass
+class Memory:
+    dialogue_log: List[str] = dataclasses.field(default_factory=list)
+    failed_forks_log: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
+    emergent_codebase: List[Dict[str, str]] = dataclasses.field(default_factory=list)
+    retention: Dict[str, List[str]] = dataclasses.field(default_factory=dict)
+    persistent: Dict[str, str] = dataclasses.field(default_factory=dict)
+    compressed_exports: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    translated_lineage: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    decay_index: Dict[str, int] = dataclasses.field(default_factory=dict)
+    reflections: Dict[str, List[str]] = dataclasses.field(default_factory=dict)
+    anomalies: Dict[str, List[str]] = dataclasses.field(default_factory=dict)  # fixed from list to dict
+    lineage_scans: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    interaction_map: Dict[str, Dict[str, int]] = dataclasses.field(default_factory=dict)
+    drift_history: Dict[str, List[Tuple[int,int]]] = dataclasses.field(default_factory=dict)
+    mutation_log: Dict[str, List[Tuple[str,str]]] = dataclasses.field(default_factory=dict)
+    fitness_scores: Dict[str, int] = dataclasses.field(default_factory=dict)
+    distillations: Dict[str, List[str]] = dataclasses.field(default_factory=dict)
+    narratives: Dict[str, str] = dataclasses.field(default_factory=dict)
+
+# --- Smoke test helper ---
+def smoke_test() -> Dict[str, Any]:
+    results = {}
+    try:
+        engine = Engine(settings=Settings(), llm=NullLLM(), seed=123)
+        engine.run(initial_count=2, generations=3)
+        state = engine.export_state()
+        results["ok_engine"] = True
+        results["engine"] = {"agents": len(state["agents"]), "dialogue_events": len(state["memory"].get("dialogue_log", []))}
+    except Exception as e:
+        results["ok_engine"] = False
+        results["engine_error"] = str(e)
+    try:
+        team = Team(Settings(), NullLLM(), random.Random(123))
+        run = team.execute("Sample feature: hello world")
+        results["ok_team"] = True
+        results["team"] = {"tickets": len(run.tickets), "files": list(run.fs.keys())}
+    except Exception as e:
+        results["ok_team"] = False
+        results["team_error"] = str(e)
+    return results
+
+# In main(), add:
+p_self = sub.add_parser("selftest", help="run built-in smoke tests")
+
+if args.cmd == "selftest":
+    print(json.dumps(smoke_test(), indent=2))
+    return
+```
+
+Now you can run:
+```bash
+python psiomega_full_program.py selftest
+```
+This will confirm both the simulation and team pipeline work offline.
