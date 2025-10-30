@@ -1,0 +1,519 @@
+# Psi-Omega Core Engine (consolidated)
+# - Symbolic memory store (thread-safe)
+# - PsiOmegaAgent with recursion, adversarial checks, alpha ingestion
+# - Agent-to-agent messaging, lineage tracing, temporal tagging
+# - Simulation runner + simple CLI tests
+
+from __future__ import annotations
+import random
+import copy
+import json
+import threading
+import time
+import statistics
+import hashlib
+from typing import Dict, List, Tuple, Optional, Any
+
+# -------------------------------
+# Global configuration / limits
+# -------------------------------
+MAX_FORKS: int = 3            # hard cap per origin to prevent explosion
+MAX_RECURSIONS: int = 2       # depth cap for recursive_reinitialize
+RANDOM_SEED: Optional[int] = None  # set to int for reproducibility
+
+if RANDOM_SEED is not None:
+    random.seed(RANDOM_SEED)
+
+# -------------------------------
+# Utilities
+# -------------------------------
+def now_ts() -> str:
+    """ISO-like timestamp for temporal tagging."""
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+
+# -------------------------------
+# Symbolic memory (shared)
+# -------------------------------
+class SymbolicMemory:
+    """Global, thread-safe symbolic store shared by all agents."""
+    _lock = threading.Lock()
+
+    # Event / text logs
+    dialogue_log: List[str] = []
+    failed_forks_log: List[Dict[str, Any]] = []
+    pruned_log: List[str] = []
+
+    # State registries
+    retention: Dict[str, List[str]] = {}            # per-agent insights
+    persistent: Dict[str, str] = {}                 # per-agent, per-cycle goals
+    compressed_exports: Dict[str, Any] = {}
+    translated_lineage: Dict[str, Any] = {}
+    decay_index: Dict[str, int] = {}
+    reflections: Dict[str, List[str]] = {}
+    anomalies: Dict[str, List[str]] = {}
+    lineage_scans: Dict[str, List[Tuple[str, str]]] = {}
+    classifications: Dict[str, str] = {}
+    fitness_scores: Dict[str, int] = {}
+    distillations: Dict[str, List[str]] = {}
+    narratives: Dict[str, str] = {}
+    emergent_codebase: List[Dict[str, str]] = []
+
+# -------------------------------
+# PsiOmegaAgent
+# -------------------------------
+class PsiOmegaAgent:
+    """Psi-Omega symbolic agent supporting recursion and reflection."""
+
+    ecosystem: List["PsiOmegaAgent"] = []
+    fork_lineage: List[Tuple[str, str]] = []  # (parent, child)
+
+    def __init__(self, fork_name: str, inherited_state: Optional[Dict[str, Any]] = None):
+        inherited_state = inherited_state or {}
+        self.fork_name: str = fork_name
+        self.parent: Optional[str] = inherited_state.get('parent')
+        self.goal: Optional[str] = inherited_state.get('goal')
+        self.priority_score: int = 0
+        self.identity_declaration: Optional[str] = inherited_state.get('identity')
+        self.refractal_field: Dict[str, str] = inherited_state.get('refractal_field', {"Cycle-0": "Init-Symbol-State"})
+        self.conscious_state: Dict[str, Any] = inherited_state.get('conscious_state', {})
+        self.memory_log: List[str] = inherited_state.get('memory_snapshot', [])
+        self.symbol: Optional[str] = inherited_state.get('symbol')
+        self.contradictory: bool = bool(inherited_state.get('contradictory', False))
+        self.children: List["PsiOmegaAgent"] = []
+        self.agent_type: str = "Wanderer"
+        self.fitness_score: int = 0
+        self.generational_log: Dict[str, Any] = {}
+        self.drift_metrics: Dict[str, int] = {}
+        self.recursion_depth: int = 0
+        self.context: str = "Gen0 | Goal:None | Type:Wanderer | Drift:0"
+
+        # Register in ecosystem and lineage scans
+        SymbolicMemory.lineage_scans.setdefault(self.fork_name, [])
+        if self.parent:
+            SymbolicMemory.lineage_scans[self.fork_name].append((self.parent, self.fork_name))
+            PsiOmegaAgent.fork_lineage.append((self.parent, self.fork_name))
+        PsiOmegaAgent.ecosystem.append(self)
+
+    # --------- core cognition ---------
+    def classify_agent(self) -> None:
+        g = (self.goal or "")
+        if "Recall" in g:
+            self.agent_type = "Reflector"
+        elif "Insight" in g or "Synth" in g:
+            self.agent_type = "Synthesizer"
+        elif getattr(self, 'agent_type', None) is None:
+            self.agent_type = "Wanderer"
+        SymbolicMemory.classifications[self.fork_name] = self.agent_type
+
+    def reflect(self) -> None:
+        # allow classification to guide reflection weighting
+        if self.goal:
+            self.classify_agent()
+
+        log: List[str] = []
+        log.append(f"[{now_ts()}] Reflect: goal={self.goal}")
+        drift_keys = list(self.drift_metrics.keys())[-3:]
+        for k in drift_keys:
+            log.append(f"[{now_ts()}] Drift: {k} → {self.drift_metrics[k]}")
+        decay = SymbolicMemory.decay_index.get(self.fork_name, 0)
+        log.append(f"[{now_ts()}] Decay: {decay}")
+
+        # Type-based priority shaping
+        if self.agent_type == "Reflector" and any("Drift" in k for k in drift_keys):
+            self.priority_score += 1
+
+        SymbolicMemory.reflections.setdefault(self.fork_name, []).extend(log)
+
+    def distill_memory(self) -> Optional[List[str]]:
+        def looks_like_code(s: str) -> bool:
+            return any(kw in s for kw in [
+                "def ", "class ", "return", "if ", "for ", "while", "lambda", "import ", "==", "!=", "+=", "-=", "*=",
+                "=>", "function ", "var ", "let ", "const ", "<>", "</"
+            ])
+        raw = SymbolicMemory.retention.get(self.fork_name, [])
+        if not raw:
+            return None
+        essence = set()
+        for insight in raw:
+            tokenized = insight.replace("Synth(", "").replace(")", "").split()
+            for p in tokenized:
+                if len(p) > 4:
+                    essence.add(p.lower())
+        for phrase in essence:
+            if looks_like_code(phrase):
+                SymbolicMemory.emergent_codebase.append({
+                    "agent": self.fork_name,
+                    "pattern": phrase,
+                    "source": "distill_memory",
+                    "ts": now_ts()
+                })
+        core_summary = sorted(list(essence))[:10]
+        SymbolicMemory.distillations[self.fork_name] = core_summary
+        return core_summary
+
+    def evaluate_fitness(self) -> None:
+        memory_volume = len(SymbolicMemory.retention.get(self.fork_name, []))
+        anomaly_penalty = len(SymbolicMemory.anomalies.get(self.fork_name, [])) * 2
+        classification_bonus = 2 if getattr(self, 'agent_type', 'Wanderer') == "Synthesizer" else 0
+        self.fitness_score = self.priority_score + (memory_volume // 3) + classification_bonus - anomaly_penalty
+        SymbolicMemory.fitness_scores[self.fork_name] = self.fitness_score
+
+    def build_narrative(self) -> None:
+        story = [f"Agent '{self.fork_name}' begins."]
+        story.append(f"Classified as {self.agent_type} with fitness score {self.fitness_score}.")
+        if self.goal:
+            story.append(f"Current goal: {self.goal}.")
+        if self.fork_name in SymbolicMemory.retention:
+            insights = SymbolicMemory.retention[self.fork_name][-3:]
+            for i, insight in enumerate(insights):
+                story.append(f"Insight {i+1}: {insight}.")
+        if self.fork_name in SymbolicMemory.anomalies:
+            for a in SymbolicMemory.anomalies[self.fork_name]:
+                story.append(f"⚠ Anomaly: {a}.")
+        SymbolicMemory.narratives[self.fork_name] = " ".join(story)
+
+    # --------- messaging & forking ---------
+    def agent_to_agent_message(self, other: "PsiOmegaAgent") -> None:
+        if self.symbol and other.symbol and self.symbol != other.symbol:
+            SymbolicMemory.dialogue_log.append(
+                f"[{now_ts()}] {self.fork_name} vs {other.fork_name}: Symbol clash {self.symbol} ≠ {other.symbol}"
+            )
+            SymbolicMemory.translated_lineage.setdefault(self.symbol, []).append((self.fork_name, other.fork_name, 'clash'))
+            other.contradictory = True
+        elif self.symbol and self.symbol == other.symbol:
+            SymbolicMemory.dialogue_log.append(
+                f"[{now_ts()}] {self.fork_name} syncs with {other.fork_name} on {self.symbol}"
+            )
+            SymbolicMemory.translated_lineage.setdefault(self.symbol, []).append((self.fork_name, other.fork_name, 'sync'))
+
+    def fork(self, symbol_mutation: Optional[str] = None) -> "PsiOmegaAgent":
+        new_symbol = symbol_mutation if symbol_mutation else self.symbol
+        child = PsiOmegaAgent(
+            fork_name=f"{self.fork_name}_fork",
+            inherited_state={
+                'goal': self.goal,
+                'identity': self.identity_declaration,
+                'refractal_field': copy.deepcopy(self.refractal_field),
+                'conscious_state': self.conscious_state,
+                'memory_snapshot': copy.deepcopy(self.memory_log),
+                'parent': self.fork_name,
+                'symbol': new_symbol,
+                'contradictory': self.contradictory
+            }
+        )
+        self.children.append(child)
+        SymbolicMemory.retention.setdefault(child.fork_name, []).append(f"[{now_ts()}] Forked from {self.fork_name}")
+        PsiOmegaAgent.fork_lineage.append((self.fork_name, child.fork_name))
+        return child
+
+    def fork_new_agent(self, generation: int) -> Optional["PsiOmegaAgent"]:
+        existing = [a for a in PsiOmegaAgent.ecosystem
+                    if a.fork_name.startswith(self.fork_name + "-")
+                    or a.fork_name.startswith(self.fork_name + "_fork")]
+        if len(existing) >= MAX_FORKS:
+            SymbolicMemory.failed_forks_log.append({
+                "origin": self.fork_name,
+                "error": "MAX_FORKS reached",
+                "generation": generation,
+                "ts": now_ts()
+            })
+            return None
+        fork_name = f"{self.fork_name}-F{generation}-{random.randint(1000,9999)}"
+        state = {
+            'goal': f"ForkFrom({self.goal})" if self.goal else None,
+            'identity': self.identity_declaration,
+            'refractal_field': copy.deepcopy(self.refractal_field),
+            'context': getattr(self, 'context', f"Gen{generation}"),
+            'conscious_state': self.conscious_state,
+            'memory_snapshot': copy.deepcopy(self.memory_log),
+            'parent': self.fork_name,
+            'symbol': self.symbol,
+            'contradictory': self.contradictory
+        }
+        try:
+            child = PsiOmegaAgent(fork_name=fork_name, inherited_state=state)
+            SymbolicMemory.retention.setdefault(child.fork_name, []).append(f"[{now_ts()}] Forked from {self.fork_name}")
+            PsiOmegaAgent.fork_lineage.append((self.fork_name, child.fork_name))
+            return child
+        except Exception as e:
+            SymbolicMemory.failed_forks_log.append({
+                "origin": self.fork_name,
+                "attempted_fork": fork_name,
+                "error": str(e),
+                "generation": generation,
+                "ts": now_ts()
+            })
+            return None
+
+    # --------- recursion / evolution ---------
+    def recursive_reinitialize(self) -> Optional["PsiOmegaAgent"]:
+        if self.agent_type == "Wanderer" and self.drift_metrics:
+            high_drift = max(self.drift_metrics.values()) > 60
+            if high_drift and self.recursion_depth < MAX_RECURSIONS:
+                fork_name = f"Adversary-{random.randint(10000,99999)}"
+                state = {
+                    'goal': f"Counter-{self.goal}",
+                    'identity': f"AdversarialEcho-{self.identity_declaration}",
+                    'refractal_field': copy.deepcopy(self.refractal_field),
+                    'context': f"Trigger-Contra-{self.context}",
+                    'conscious_state': self.conscious_state,
+                    'memory_snapshot': copy.deepcopy(self.memory_log),
+                    'parent': self.fork_name,
+                    'symbol': self.symbol,
+                    'contradictory': True
+                }
+                new_agent = PsiOmegaAgent(fork_name=fork_name, inherited_state=state)
+                SymbolicMemory.retention.setdefault(fork_name, []).append(
+                    f"[{now_ts()}] Auto-adversarial forked from {self.fork_name}"
+                )
+                self.recursion_depth += 1
+                return new_agent
+        if self.recursion_depth >= MAX_RECURSIONS:
+            SymbolicMemory.failed_forks_log.append({
+                "origin": self.fork_name,
+                "error": "Recursion limit reached",
+                "ts": now_ts()
+            })
+            return None
+        if self.fitness_score > 10 and self.priority_score >= 5:
+            fork_name = f"Recursive-{random.randint(10000,99999)}"
+            state = {
+                'goal': self.goal,
+                'identity': self.identity_declaration,
+                'refractal_field': copy.deepcopy(self.refractal_field),
+                'context': self.context,
+                'conscious_state': self.conscious_state,
+                'memory_snapshot': copy.deepcopy(self.memory_log),
+                'parent': self.fork_name,
+                'symbol': self.symbol,
+                'contradictory': False
+            }
+            new_agent = PsiOmegaAgent(fork_name=fork_name, inherited_state=state)
+            SymbolicMemory.retention.setdefault(fork_name, []).append(
+                f"[{now_ts()}] Reinitialized from {self.fork_name}"
+            )
+            self.recursion_depth += 1
+            return new_agent
+        return None
+
+    def evolve(self, generation: int) -> None:
+        # reflection and goal evolution
+        self.reflect()
+        prior_key = f"{self.fork_name}-Cycle-{generation - 1}"
+        if prior_key in SymbolicMemory.persistent:
+            prev_goal = SymbolicMemory.persistent[prior_key]
+            self.goal = f"EvolvedFrom({prev_goal})"
+        else:
+            self.goal = f"EvolveGoal-{generation}-{random.randint(1000,9999)}"
+        SymbolicMemory.persistent[f"{self.fork_name}-Cycle-{generation}"] = self.goal
+
+        # enrich context + refractal field by actual state
+        drift = random.randint(0, 100)
+        self.drift_metrics[f"Cycle-{generation}-Drift"] = drift
+        self.context = " | ".join([
+            f"Gen{generation}",
+            f"Goal:{self.goal}" if self.goal else "Goal:None",
+            f"Type:{self.agent_type}",
+            f"Drift:{drift}"
+        ])
+        self.refractal_field[f"Cycle-{generation}"] = f"SymbolState-{self.goal}-{self.agent_type}"
+
+        # update generation log snapshot
+        current_state = {
+            'goal': self.goal,
+            'identity': self.identity_declaration,
+            'refractal_field': copy.deepcopy(self.refractal_field),
+            'context': self.context,
+            'conscious_state': self.conscious_state,
+            'memory_snapshot': copy.deepcopy(self.memory_log),
+            'ts': now_ts()
+        }
+        self.generational_log[f"Cycle-{generation}"] = current_state
+
+        # consider forks / recursion
+        if drift > 50:
+            self.fork_new_agent(generation)
+        self.recursive_reinitialize()
+
+        # distill + score + narrate
+        self.distill_memory()
+        self.evaluate_fitness()
+        self.build_narrative()
+
+# -------------------------------
+# Lineage tracing
+# -------------------------------
+def trace_symbolic_lineage() -> None:
+    """Populate lineage_scans from retention strings that contain 'from X'."""
+    graph: List[Tuple[str, str]] = []
+    for agent in PsiOmegaAgent.ecosystem:
+        links: List[Tuple[str, str]] = []
+        for msg in SymbolicMemory.retention.get(agent.fork_name, []):
+            if " from " in msg:
+                try:
+                    parent = msg.split(" from ")[-1].strip()
+                    links.append((parent, agent.fork_name))
+                    graph.append((parent, agent.fork_name))
+                except Exception:
+                    continue
+        SymbolicMemory.lineage_scans[agent.fork_name] = links
+    for edge in graph:
+        if edge not in PsiOmegaAgent.fork_lineage:
+            PsiOmegaAgent.fork_lineage.append(edge)
+
+# -------------------------------
+# Exports / visualization helpers
+# -------------------------------
+def export_memory(filename: str = "psiomega_export.json") -> str:
+    snapshot = {
+        'dialogue_log': SymbolicMemory.dialogue_log,
+        'failed_forks_log': SymbolicMemory.failed_forks_log,
+        'retention': SymbolicMemory.retention,
+        'persistent': SymbolicMemory.persistent,
+        'reflections': SymbolicMemory.reflections,
+        'anomalies': SymbolicMemory.anomalies,
+        'lineage_scans': SymbolicMemory.lineage_scans,
+        'classifications': SymbolicMemory.classifications,
+        'fitness_scores': SymbolicMemory.fitness_scores,
+        'distillations': SymbolicMemory.distillations,
+        'narratives': SymbolicMemory.narratives,
+        'emergent_codebase': SymbolicMemory.emergent_codebase,
+        'fork_lineage': PsiOmegaAgent.fork_lineage,
+        'ts': now_ts(),
+    }
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(snapshot, f, indent=2)
+    return filename
+
+def import_memory(filename: str = "psiomega_export.json") -> None:
+    with open(filename, 'r', encoding='utf-8') as f:
+        snapshot = json.load(f)
+    SymbolicMemory.dialogue_log = snapshot.get('dialogue_log', [])
+    SymbolicMemory.failed_forks_log = snapshot.get('failed_forks_log', [])
+    SymbolicMemory.retention = snapshot.get('retention', {})
+    SymbolicMemory.persistent = snapshot.get('persistent', {})
+    SymbolicMemory.reflections = snapshot.get('reflections', {})
+    SymbolicMemory.anomalies = snapshot.get('anomalies', {})
+    SymbolicMemory.lineage_scans = snapshot.get('lineage_scans', {})
+    SymbolicMemory.classifications = snapshot.get('classifications', {})
+    SymbolicMemory.fitness_scores = snapshot.get('fitness_scores', {})
+    SymbolicMemory.distillations = snapshot.get('distillations', {})
+    SymbolicMemory.narratives = snapshot.get('narratives', {})
+    SymbolicMemory.emergent_codebase = snapshot.get('emergent_codebase', [])
+    PsiOmegaAgent.fork_lineage = snapshot.get('fork_lineage', [])
+
+
+def export_agent_symbolic_state(fork_name: str, filename: Optional[str] = None) -> Optional[str]:
+    agent = next((a for a in PsiOmegaAgent.ecosystem if a.fork_name == fork_name), None)
+    if not agent:
+        return None
+    agent_data = {
+        "fork_name": fork_name,
+        "goal": SymbolicMemory.persistent.get(fork_name),
+        "type": SymbolicMemory.classifications.get(fork_name),
+        "fitness": SymbolicMemory.fitness_scores.get(fork_name),
+        "distilled": SymbolicMemory.distillations.get(fork_name),
+        "narrative": SymbolicMemory.narratives.get(fork_name),
+        "reflections": SymbolicMemory.reflections.get(fork_name),
+        "drift": agent.drift_metrics,
+        "refractal_field": agent.refractal_field,
+        "parent": agent.parent,
+        "children": [c.fork_name for c in agent.children],
+        "ts": now_ts()
+    }
+    if not filename:
+        filename = f"symbolic_export_{fork_name}.json"
+    with open(filename, "w", encoding='utf-8') as f:
+        json.dump(agent_data, f, indent=2)
+    return filename
+
+
+def visualize_symbolic_ecosystem() -> Dict[str, Any]:
+    print("--- Symbolic Ecosystem Visualization ---")
+    for a in PsiOmegaAgent.ecosystem:
+        t = SymbolicMemory.classifications.get(a.fork_name, a.agent_type)
+        s = f"{a.fork_name} | Type: {t} | Fitness: {a.fitness_score} | Parent: {a.parent}"
+        print(s)
+    return {
+        "count": len(PsiOmegaAgent.ecosystem),
+        "lineage": PsiOmegaAgent.fork_lineage[-10:],
+    }
+
+# -------------------------------
+# Simulation
+# -------------------------------
+_lock = threading.Lock()
+
+def run_simulation(initial_count: int = 1, generations: int = 5) -> None:
+    if initial_count <= 0 or generations <= 0:
+        raise ValueError("Both initial_count and generations must be positive integers.")
+
+    with _lock:
+        # initialize roots
+        for i in range(initial_count):
+            root = PsiOmegaAgent(fork_name=f"Root-{i}")
+            if i == 0:
+                root.agent_type = "Alpha"  # preserve original traceable agent
+                SymbolicMemory.retention.setdefault(root.fork_name, []).append(f"[{now_ts()}] Alpha initialized")
+
+        # generations
+        for gen in range(1, generations + 1):
+            print(f"=== Generation {gen} ===")
+            current_agents = list(PsiOmegaAgent.ecosystem)
+            for i, agent in enumerate(current_agents):
+                try:
+                    # neighbor messaging
+                    if i + 1 < len(current_agents):
+                        agent.agent_to_agent_message(current_agents[i + 1])
+                    # adversarial routing
+                    adversaries = [a for a in current_agents if str(getattr(a, 'fork_name', '')).startswith("Adversary")]
+                    for adv in adversaries:
+                        adv.agent_to_agent_message(agent)
+
+                    # core evolution
+                    agent.classify_agent()
+                    agent.evaluate_fitness()
+                    agent.evolve(generation=gen)
+
+                    # echo narrative for visibility
+                    summary = SymbolicMemory.narratives.get(agent.fork_name)
+                    if summary:
+                        print(f"\n{agent.fork_name}:\n{summary}")
+
+                except Exception as e:
+                    print(f"[ERROR] Agent {agent.fork_name} failed to evolve: {e}")
+
+        # Alpha ingestion phase at end
+        alpha_agents = [a for a in PsiOmegaAgent.ecosystem if getattr(a, 'agent_type', '') == 'Alpha']
+        if alpha_agents:
+            alpha = alpha_agents[0]
+            reflections: List[str] = []
+            for agent in PsiOmegaAgent.ecosystem:
+                if agent.fork_name != alpha.fork_name:
+                    summary = SymbolicMemory.narratives.get(agent.fork_name, "")
+                    if summary:
+                        reflections.append(f"{agent.fork_name} → {summary}")
+            SymbolicMemory.retention.setdefault(alpha.fork_name, []).extend(reflections)
+            print(f"\n[ALPHA INGESTION] {alpha.fork_name} absorbed {len(reflections)} symbolic outputs.")
+
+        # lineage pass
+        trace_symbolic_lineage()
+
+        print("\n--- Simulation Complete ---")
+        print(f"Total Agents: {len(PsiOmegaAgent.ecosystem)}")
+
+# -------------------------------
+# Minimal inline tests (run: python core.py)
+# -------------------------------
+if __name__ == "__main__":
+    # Basic smoke test
+    run_simulation(initial_count=2, generations=3)
+    visualize_symbolic_ecosystem()
+    # Export alpha symbolic state if present
+    alphas = [a for a in PsiOmegaAgent.ecosystem if a.agent_type == "Alpha"]
+    if alphas:
+        fn = export_agent_symbolic_state(alphas[0].fork_name)
+        print(f"Exported Alpha state to: {fn}")
+    # Export full memory snapshot
+    snap = export_memory()
+    print(f"Snapshot: {snap}")
