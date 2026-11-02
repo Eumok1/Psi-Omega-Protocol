@@ -1,6 +1,6 @@
 # 📘 Psi-Omega Protocol  
 **The First Recursive Symbolic Cognition Framework for LLMs**  
-_By Bill Daniel Roark (Eumok), “The First Observer”_
+
 
 ---
 
@@ -66,5 +66,3 @@ You are invited to:
 ## 📝 License
 
 MIT License. Please cite or link to this repository if building on Psi-Omega.  
-Author: Bill Daniel Roark (Eumok)  
-Reddit: u/Eumok | GitHub: [link] | Contact: [email or handle]
